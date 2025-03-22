@@ -14,6 +14,7 @@
 # limitations under the License.
 #
 
+import subprocess
 import requests
 import time
 import os
@@ -802,12 +803,20 @@ class ChatBotUI:
     def shutdown_deploy(self):
         serve.shutdown()
 
+
+
     def exec_command(self, index, command, ray=False):
-        if ray:
-            if self.conda_env_name:
-                command = f"conda activate {self.conda_env_name}; " + command
-        _, stdout, stderr = self.ssh_connect[index].exec_command(command)
-        return stdout.read().decode("utf-8"), stderr.read().decode("utf-8")
+        if ray and self.conda_env_name:
+            command = f"conda activate {self.conda_env_name}; {command}"
+
+        if self.ssh_connect[index] is not None:
+            # Remote execution via SSH
+            _, stdout, stderr = self.ssh_connect[index].exec_command(command)
+            return stdout.read().decode("utf-8"), stderr.read().decode("utf-8")
+        else:
+            # Local execution without SSH
+            result = subprocess.run(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            return result.stdout, result.stderr
 
     def get_ray_cluster(self):
         command = "ray status"
@@ -928,29 +937,11 @@ class ChatBotUI:
             return self.default_rag_path
 
     def _init_ui(self):
-        mark_alive = None
-        for index in range(len(self.ray_nodes)):
-            if "node:__internal_head__" in ray.nodes()[index]["Resources"]:
-                mark_alive = index
-            node_ip = self.ray_nodes[index]["NodeName"]
-            self.ssh_connect[index] = paramiko.SSHClient()
-            self.ssh_connect[index].load_system_host_keys()
-            self.ssh_connect[index].set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            self.ssh_connect[index].connect(
-                hostname=node_ip, port=self.node_port, username=self.user_name
-            )
-        if mark_alive is None:
-            print("No alive ray worker found! Exit")
-            return
-        self.ssh_connect[-1] = paramiko.SSHClient()
-        self.ssh_connect[-1].load_system_host_keys()
-        self.ssh_connect[-1].set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        self.ssh_connect[-1].connect(
-            hostname=self.ray_nodes[mark_alive]["NodeName"],
-            port=self.node_port,
-            username=self.user_name,
-        )
-
+        for node in self.ray_nodes:
+            node_ip = node["NodeName"]
+            if node_ip in ["127.0.0.1", "localhost", self.head_node_ip]:
+                print(f"Running locally on node: {node_ip}")
+        print("Local UI initialization completed.")
         title = "Manage LLM Lifecycle"
         with gr.Blocks(css=custom_css, title=title) as gr_chat:
             logo_path = os.path.join(self.repo_code_path, "ui/images/logo.png")
@@ -1756,7 +1747,6 @@ if __name__ == "__main__":
         repo_path + os.path.sep + "../examples/data/sample_finetune_data.jsonl"
     )
 
-    from llm_on_ray.finetune.finetune import get_accelerate_environment_variable
 
     finetune_config: Dict[str, Any] = {
         "General": {"config": {}},
@@ -1787,8 +1777,6 @@ if __name__ == "__main__":
         },
         "address": "auto",
     }
-    accelerate_env_vars = get_accelerate_environment_variable(finetune_config)
-    ray_init_config["runtime_env"]["env_vars"].update(accelerate_env_vars)
     print("Start to init Ray connection")
     context = ray.init(**ray_init_config)
     print("Ray connected")
